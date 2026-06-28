@@ -3,18 +3,75 @@ import { NextResponse } from 'next/server'
 
 interface TenderListing {
   title: string
+  entity: string
   category: string
   closingDate: string
+  daysRemaining: number
   url: string
   tenderNumber?: string
+  location?: string
 }
 
-function parseClosingDate(dateStr: string): string | null {
+const PROVINCES = [
+  'Gauteng', 'Mpumalanga', 'Limpopo', 'KwaZulu-Natal', 'KZN',
+  'Western Cape', 'Eastern Cape', 'Northern Cape', 'Free State', 'North West'
+]
+
+function toTitleCase(str: string): string {
+  return str.toLowerCase().replace(/\w\S*/g, (txt) =>
+    txt.charAt(0).toUpperCase() + txt.substring(1).toLowerCase()
+  )
+}
+
+function extractLocation(text: string): string | undefined {
+  for (const prov of PROVINCES) {
+    if (text.toLowerCase().includes(prov.toLowerCase())) {
+      return prov
+    }
+  }
+  return undefined
+}
+
+function extractEntity(description: string): string {
+  // Entity is often mentioned at the end in patterns like:
+  // "Supply and Delivery of X for Y" where Y is the entity
+  // or "The Department of X invites..." 
+  // or "Entity: X"
+  
+  // Try to find entity patterns
+  const patterns = [
+    /(?:for|to|by|from)\s+([A-Z][A-Za-z\s]+(?:District|Municipality|Province|Department|City|Metro|Council|Board|Authority))/i,
+    /(?:Entity|Buyer|Client|Organization)[:\s]+([A-Za-z\s]+)/i,
+  ]
+  
+  for (const pattern of patterns) {
+    const match = description.match(pattern)
+    if (match) {
+      return match[1].trim()
+    }
+  }
+  
+  // Fallback: last meaningful capitalized phrase
+  const words = description.split(/\s+/)
+  const meaningful = words.filter(w => w.length > 3 && /^[A-Z]/.test(w))
+  if (meaningful.length > 0) {
+    return meaningful[meaningful.length - 1]
+  }
+  
+  return 'Unknown'
+}
+
+function parseClosingDate(dateStr: string): { date: string; daysRemaining: number } | null {
   // eTenders format: "27/06/2026 in 8 days" or "27 June 2026"
-  const match = dateStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/)
-  if (match) {
-    const [, day, month, year] = match
-    return new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00Z`).toISOString()
+  const slashMatch = dateStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/)
+  if (slashMatch) {
+    const [, day, month, year] = slashMatch
+    const dateStr2 = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00Z`
+    const closingDate = new Date(dateStr2)
+    const now = new Date()
+    const diffTime = closingDate.getTime() - now.getTime()
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
+    return { date: dateStr2, daysRemaining: diffDays }
   }
   
   // Try "in X days" format
@@ -23,7 +80,20 @@ function parseClosingDate(dateStr: string): string | null {
     const days = parseInt(daysMatch[1])
     const date = new Date()
     date.setDate(date.getDate() + days)
-    return date.toISOString()
+    return { date: date.toISOString(), daysRemaining: days }
+  }
+  
+  // Try "dd Month yyyy" format
+  const monthMatch = dateStr.match(/(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i)
+  if (monthMatch) {
+    const [, day, month, year] = monthMatch
+    const monthNum = new Date(`${month} 1, 2000`).getMonth() + 1
+    const dateStr2 = `${year}-${String(monthNum).padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00Z`
+    const closingDate = new Date(dateStr2)
+    const now = new Date()
+    const diffTime = closingDate.getTime() - now.getTime()
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
+    return { date: dateStr2, daysRemaining: diffDays }
   }
   
   return null
@@ -52,12 +122,11 @@ async function scrapeETenders(): Promise<TenderListing[]> {
     for (const line of lines) {
       const trimmed = line.trim()
       
-      // Detect category headers (usually in CAPS or specific format)
+      // Detect category headers
       if (trimmed.length > 0 && trimmed.length < 100) {
-        // Check if it looks like a category
         const categoryKeywords = ['Construction', 'Energy', 'Facilities', 'Fleet', 'Technology', 
                                  'Office', 'Print', 'Professional', 'Travel', 'Communication',
-                                 'MARC', 'Water', 'Security', 'Electrical', 'Plumbing']
+                                 'MARC', 'Water', 'Security', 'Electrical', 'Plumbing', 'Chemical']
         
         if (categoryKeywords.some(k => trimmed.toLowerCase().includes(k.toLowerCase()))) {
           currentCategory = trimmed
@@ -65,24 +134,34 @@ async function scrapeETenders(): Promise<TenderListing[]> {
         }
       }
       
-      // Look for lines with dates (closing dates pattern)
+      // Look for lines with dates
       const datePatterns = [
         /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})\s*(?:in\s+\d+\s+days?)?/i,
-        /(\d{1,2}\s+\w+\s+\d{4})/i,
+        /(\d{1,2}\s+\w+\s+\d{4})\s*(?:in\s+\d+\s+days?)?/i,
       ]
       
       for (const pattern of datePatterns) {
         const dateMatch = trimmed.match(pattern)
         if (dateMatch) {
           const dateStr = dateMatch[1]
-          const title = trimmed.replace(pattern, '').replace(dateStr, '').trim()
+          const titleAndRest = trimmed.replace(pattern, '').trim()
+          
+          // Extract title (everything before the date pattern)
+          const title = titleAndRest.replace(dateStr, '').trim()
           
           if (title.length > 10) {
+            const entity = extractEntity(title)
+            const location = extractLocation(title)
+            const parsed = parseClosingDate(dateStr + (dateStr.includes('in') ? '' : ' in 30 days'))
+            
             listings.push({
-              title: title.substring(0, 200),
+              title: toTitleCase(title).substring(0, 250),
+              entity,
               category: currentCategory || 'General',
-              closingDate: dateStr,
-              url: 'https://www.etenders.gov.za/Home/opportunities?id=1'
+              closingDate: parsed?.date || new Date().toISOString(),
+              daysRemaining: parsed?.daysRemaining || 30,
+              url: 'https://www.etenders.gov.za/Home/opportunities?id=1',
+              location
             })
           }
           break
@@ -124,7 +203,7 @@ export async function POST() {
     
     for (const listing of listings) {
       try {
-        // Check if tender already exists (by title)
+        // Check if tender already exists (by title and entity)
         const { data: existing } = await supabase
           .from('toisa_tenders')
           .select('id')
@@ -134,10 +213,14 @@ export async function POST() {
         
         if (existing) {
           // Update existing tender
-          const closingDate = parseClosingDate(listing.closingDate)
           await supabase
             .from('toisa_tenders')
-            .update({ closing_date: closingDate })
+            .update({ 
+              closing_date: listing.closingDate,
+              days_remaining: listing.daysRemaining,
+              entity: listing.entity,
+              location: listing.location
+            })
             .eq('id', existing.id)
           updatedCount++
         } else {
@@ -145,32 +228,47 @@ export async function POST() {
           let relevanceScore = 5
           const titleLower = listing.title.toLowerCase()
           const categoryLower = listing.category.toLowerCase()
+          const matchReasons: string[] = []
           
           // Boost score for matching categories
           for (const cat of userCategories) {
             if (titleLower.includes(cat.toLowerCase()) || categoryLower.includes(cat.toLowerCase())) {
               relevanceScore += 2
+              matchReasons.push(`${cat} category`)
             }
           }
           
           // Boost score for matching provinces
           for (const prov of userProvinces) {
-            if (titleLower.includes(prov.toLowerCase())) {
+            if (listing.location?.toLowerCase().includes(prov.toLowerCase()) || 
+                titleLower.includes(prov.toLowerCase())) {
               relevanceScore += 1
+              matchReasons.push(`${prov} province`)
             }
+          }
+          
+          // Boost score for urgent tenders
+          if (listing.daysRemaining < 7) {
+            relevanceScore += 3
+            matchReasons.push('Urgent (closing soon)')
+          } else if (listing.daysRemaining < 14) {
+            relevanceScore += 1
           }
           
           // Cap at 10
           relevanceScore = Math.min(10, relevanceScore)
           
           // Insert new tender
-          const closingDate = parseClosingDate(listing.closingDate)
           await supabase.from('toisa_tenders').insert({
             source_portal: 'etenders',
             title: listing.title,
+            entity: listing.entity,
             category: listing.category,
-            closing_date: closingDate,
+            closing_date: listing.closingDate,
+            days_remaining: listing.daysRemaining,
+            location: listing.location,
             url: listing.url,
+            tender_number: listing.tenderNumber,
             status: 'new',
             relevance_score: relevanceScore,
             discovered_at: new Date().toISOString(),
@@ -185,7 +283,7 @@ export async function POST() {
     return NextResponse.json({
       new_count: newCount,
       updated_count: updatedCount,
-      errors: errors.slice(0, 5), // Return first 5 errors
+      errors: errors.slice(0, 5),
       total_listings_found: listings.length,
     })
   } catch (error) {

@@ -5,12 +5,11 @@ import { createClient } from '@/lib/supabase/client'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { FileText, RefreshCw, Plus, ExternalLink, Filter, Loader2 } from 'lucide-react'
+import { FileText, RefreshCw, Plus, ExternalLink, Filter, Loader2, MapPin, Clock, Building } from 'lucide-react'
 import { format } from 'date-fns'
 import { toast } from 'sonner'
 import Link from 'next/link'
@@ -20,15 +19,126 @@ interface Tender {
   source_portal: string
   tender_number: string | null
   title: string
+  entity: string | null
   description: string | null
   url: string | null
   category: string | null
   location: string | null
   closing_date: string | null
+  days_remaining: number | null
   estimated_value: number | null
   status: string
   relevance_score: number
   discovered_at: string
+}
+
+function TenderCard({ tender, onAddToPipeline, onMarkIrrelevant }: {
+  tender: Tender
+  onAddToPipeline: (t: Tender) => void
+  onMarkIrrelevant: (t: Tender) => void
+}) {
+  const daysRemaining = tender.days_remaining ?? 0
+  const urgencyColor = daysRemaining < 0 ? 'text-slate-400' : daysRemaining < 7 ? 'text-red-600' : daysRemaining < 14 ? 'text-amber-600' : 'text-green-600'
+  const urgencyBg = daysRemaining < 0 ? 'bg-slate-100' : daysRemaining < 7 ? 'bg-red-50 border-red-200' : daysRemaining < 14 ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'
+  
+  return (
+    <div className={`border rounded-lg p-5 hover:shadow-md transition-all ${urgencyBg}`}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1 min-w-0">
+          {/* Entity - Bold at top */}
+          <div className="flex items-center gap-2 mb-2">
+            <Building className="w-4 h-4 text-slate-400" />
+            <span className="font-semibold text-slate-900">{tender.entity || 'Unknown Entity'}</span>
+          </div>
+          
+          {/* Title */}
+          <h3 className="text-base font-medium text-slate-800 mb-2 leading-snug">{tender.title}</h3>
+          
+          {/* Meta row */}
+          <div className="flex items-center gap-3 flex-wrap text-sm text-slate-500 mb-3">
+            {tender.category && (
+              <Badge variant="secondary" className="text-xs">{tender.category}</Badge>
+            )}
+            {tender.location && (
+              <span className="flex items-center gap-1">
+                <MapPin className="w-3 h-3" />
+                {tender.location}
+              </span>
+            )}
+            {tender.tender_number && (
+              <span className="font-mono text-xs">#{tender.tender_number}</span>
+            )}
+          </div>
+        </div>
+        
+        {/* Right side - closing info */}
+        <div className="text-right shrink-0">
+          <div className="flex items-center gap-1 justify-end text-slate-500 text-xs mb-1">
+            <Clock className="w-3 h-3" />
+            <span>Closes</span>
+          </div>
+          {tender.closing_date ? (
+            <>
+              <p className="font-medium text-slate-900 text-sm">
+                {format(new Date(tender.closing_date), 'MMM d, yyyy')}
+              </p>
+              <p className={`font-semibold text-sm ${urgencyColor}`}>
+                {daysRemaining < 0 ? 'CLOSED' : `in ${daysRemaining}d`}
+              </p>
+            </>
+          ) : (
+            <p className="text-slate-400 text-sm">TBD</p>
+          )}
+        </div>
+      </div>
+      
+      {/* Bottom row - relevance + actions */}
+      <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-200">
+        {/* Relevance score */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">Match:</span>
+          <div className="flex">
+            {[...Array(10)].map((_, i) => (
+              <div
+                key={i}
+                className={`w-2 h-3 rounded-sm mx-px ${
+                  i < tender.relevance_score ? 'bg-blue-500' : 'bg-slate-200'
+                }`}
+              />
+            ))}
+          </div>
+          <span className="text-xs font-medium text-blue-600 ml-1">{tender.relevance_score}/10</span>
+        </div>
+        
+        {/* Actions */}
+        <div className="flex items-center gap-2">
+          {tender.url && (
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => window.open(tender.url!, '_blank')}>
+              <ExternalLink className="w-3 h-3 mr-1" />
+              View
+            </Button>
+          )}
+          <Button 
+            variant="default" 
+            size="sm" 
+            className="h-8 text-xs bg-blue-600 hover:bg-blue-700"
+            onClick={() => onAddToPipeline(tender)}
+          >
+            <Plus className="w-3 h-3 mr-1" />
+            Add to Pipeline
+          </Button>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            className="h-8 text-xs text-slate-500"
+            onClick={() => onMarkIrrelevant(tender)}
+          >
+            Not Relevant
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function TendersPage() {
@@ -53,7 +163,8 @@ export default function TendersPage() {
     const { data, error } = await supabase
       .from('toisa_tenders')
       .select('*')
-      .order('discovered_at', { ascending: false })
+      .order('days_remaining', { ascending: true })
+      .limit(50)
     
     if (data) setTenders(data)
     setLoading(false)
@@ -120,7 +231,6 @@ export default function TendersPage() {
       toast.error('Failed to add to pipeline')
     } else {
       toast.success('Added to pipeline!', { description: 'View in Pipeline tab' })
-      // Update tender status
       await supabase.from('toisa_tenders').update({ status: 'in_progress' }).eq('id', selectedTender.id)
       setAddToPipelineOpen(false)
       setPipelineNotes('')
@@ -146,6 +256,10 @@ export default function TendersPage() {
   const portals = [...new Set(tenders.map(t => t.source_portal))]
   const categories = [...new Set(tenders.map(t => t.category).filter(Boolean))]
 
+  // Stats
+  const urgentCount = tenders.filter(t => (t.days_remaining ?? 999) < 7 && (t.days_remaining ?? 999) >= 0).length
+  const upcomingCount = tenders.filter(t => (t.days_remaining ?? 999) >= 7 && (t.days_remaining ?? 999) < 14).length
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -167,6 +281,28 @@ export default function TendersPage() {
             {scraping ? 'Scraping...' : 'Scrape Portals'}
           </Button>
         </div>
+      </div>
+
+      {/* Quick stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <Card className={urgentCount > 0 ? 'border-red-200 bg-red-50' : ''}>
+          <CardContent className="p-4 text-center">
+            <p className={`text-2xl font-bold ${urgentCount > 0 ? 'text-red-600' : 'text-slate-400'}`}>{urgentCount}</p>
+            <p className="text-xs text-slate-500">Urgent (closing &lt;7d)</p>
+          </CardContent>
+        </Card>
+        <Card className={upcomingCount > 0 ? 'border-amber-200 bg-amber-50' : ''}>
+          <CardContent className="p-4 text-center">
+            <p className={`text-2xl font-bold ${upcomingCount > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{upcomingCount}</p>
+            <p className="text-xs text-slate-500">Upcoming (7-14d)</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-slate-600">{tenders.length}</p>
+            <p className="text-xs text-slate-500">Total Tracked</p>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Filters */}
@@ -238,79 +374,14 @@ export default function TendersPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4">
+        <div className="space-y-3">
           {filteredTenders.map(tender => (
-            <Card key={tender.id} className="hover:shadow-md transition-shadow">
-              <CardContent className="p-6">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Badge variant={tender.status === 'new' ? 'default' : 'secondary'}>
-                        {tender.status.replace('_', ' ')}
-                      </Badge>
-                      <Badge variant="outline">{tender.source_portal}</Badge>
-                      {tender.category && <Badge variant="secondary">{tender.category}</Badge>}
-                      <div className="flex items-center gap-1 ml-auto">
-                        <span className="text-xs text-slate-500">Relevance:</span>
-                        <div className="flex">
-                          {[...Array(10)].map((_, i) => (
-                            <div
-                              key={i}
-                              className={`w-2 h-4 rounded-sm mx-px ${
-                                i < tender.relevance_score ? 'bg-blue-500' : 'bg-slate-200'
-                              }`}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    <h3 className="text-lg font-semibold text-slate-900 mb-1">{tender.title}</h3>
-                    {tender.description && (
-                      <p className="text-sm text-slate-600 line-clamp-2 mb-3">{tender.description}</p>
-                    )}
-                    <div className="flex items-center gap-4 text-sm text-slate-500">
-                      {tender.tender_number && (
-                        <span>Ref: {tender.tender_number}</span>
-                      )}
-                      {tender.location && (
-                        <span>{tender.location}</span>
-                      )}
-                      {tender.closing_date && (
-                        <span className={new Date(tender.closing_date) < new Date() ? 'text-red-600' : ''}>
-                          Closes: {format(new Date(tender.closing_date), 'MMM d, yyyy')}
-                        </span>
-                      )}
-                      {tender.estimated_value && (
-                        <span>R{tender.estimated_value.toLocaleString()}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    {tender.url && (
-                      <Button variant="outline" size="sm" onClick={() => window.open(tender.url!, '_blank')}>
-                        <ExternalLink className="w-4 h-4 mr-1" />
-                        View
-                      </Button>
-                    )}
-                    <Button 
-                      variant="outline" 
-                      size="sm"
-                      onClick={() => handleAddToPipeline(tender)}
-                    >
-                      <Plus className="w-4 h-4 mr-1" />
-                      Add to Pipeline
-                    </Button>
-                    <Button 
-                      variant="ghost" 
-                      size="sm"
-                      onClick={() => handleMarkIrrelevant(tender)}
-                    >
-                      Not Relevant
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <TenderCard 
+              key={tender.id} 
+              tender={tender}
+              onAddToPipeline={handleAddToPipeline}
+              onMarkIrrelevant={handleMarkIrrelevant}
+            />
           ))}
         </div>
       )}

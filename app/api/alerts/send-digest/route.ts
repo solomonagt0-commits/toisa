@@ -5,6 +5,71 @@ import { format, addDays } from 'date-fns'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
+interface TenderRow {
+  id: string
+  title: string
+  entity: string | null
+  category: string | null
+  closing_date: string | null
+  days_remaining: number | null
+  location: string | null
+  relevance_score: number
+  url: string | null
+}
+
+function buildTenderCard(tender: TenderRow, urgency: 'urgent' | 'upcoming' | 'new'): string {
+  const colors = {
+    urgent: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b', badge: '#dc2626' },
+    upcoming: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e', badge: '#d97706' },
+    new: { bg: '#dcfce7', border: '#22c55e', text: '#166534', badge: '#16a34a' }
+  }
+  const c = colors[urgency]
+  
+  const daysRemaining = tender.days_remaining ?? 0
+  const closingFormatted = tender.closing_date 
+    ? format(new Date(tender.closing_date), 'MMM d, yyyy') 
+    : 'TBD'
+  
+  return `
+    <tr>
+      <td style="padding: 16px; background: ${c.bg}; border-left: 4px solid ${c.border}; border-radius: 8px; margin-bottom: 12px;">
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr>
+            <td style="vertical-align: top;">
+              <p style="margin: 0 0 4px 0; font-weight: 600; color: ${c.text}; font-size: 15px;">
+                ${tender.entity || 'Unknown Entity'}
+              </p>
+              <p style="margin: 0 0 8px 0; font-size: 14px; color: #1e293b;">
+                ${tender.title}
+              </p>
+              <p style="margin: 0; font-size: 12px; color: #64748b;">
+                <span style="background: #e2e8f0; padding: 2px 8px; border-radius: 4px;">${tender.category || 'General'}</span>
+                ${tender.location ? `<span style="margin-left: 8px;">📍 ${tender.location}</span>` : ''}
+              </p>
+            </td>
+            <td style="text-align: right; vertical-align: top; padding-left: 16px;">
+              <p style="margin: 0 0 4px 0; font-size: 12px; color: #64748b;">Closes</p>
+              <p style="margin: 0; font-weight: 700; color: ${c.badge}; font-size: 14px;">
+                ${closingFormatted}
+              </p>
+              <p style="margin: 2px 0 0 0; font-weight: 600; color: ${c.badge}; font-size: 13px;">
+                ${daysRemaining <= 0 ? 'CLOSED' : `in ${daysRemaining} days`}
+              </p>
+            </td>
+          </tr>
+        </table>
+        ${tender.url ? `
+          <p style="margin: 8px 0 0 0;">
+            <a href="${tender.url}" style="color: #3b82f6; text-decoration: none; font-size: 13px;">
+              View on eTenders →
+            </a>
+          </p>
+        ` : ''}
+      </td>
+    </tr>
+  `
+}
+
 export async function POST() {
   try {
     const supabase = await createClient()
@@ -16,143 +81,179 @@ export async function POST() {
     
     const userEmail = user.email || 'mahlaselaza98@gmail.com'
     
-    // Get new tenders from last 24 hours
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const { data: newTenders } = await supabase
+    // Get user's profile for match info
+    const { data: profile } = await supabase
+      .from('toisa_user_profile')
+      .select('service_categories, provinces')
+      .eq('id', user.id)
+      .single()
+    
+    // Get all tenders to categorize
+    const { data: allTenders } = await supabase
       .from('toisa_tenders')
       .select('*')
-      .gte('discovered_at', yesterday)
-      .order('relevance_score', { ascending: false })
-      .limit(10)
+      .order('discovered_at', { ascending: false })
+      .limit(50)
     
-    // Get pipeline summary
-    const { data: pipelineItems } = await supabase
-      .from('toisa_pipeline_items')
-      .select('*')
+    // Categorize by urgency
+    const urgent: TenderRow[] = []
+    const upcoming: TenderRow[] = []
+    const newThisWeek: TenderRow[] = []
     
-    const pipelineSummary = {
-      discovered: pipelineItems?.filter(p => p.stage === 'discovered').length || 0,
-      in_progress: pipelineItems?.filter(p => p.stage === 'in_progress').length || 0,
-      submitted: pipelineItems?.filter(p => p.stage === 'submitted').length || 0,
-      under_review: pipelineItems?.filter(p => p.stage === 'under_review').length || 0,
-      won: pipelineItems?.filter(p => p.stage === 'won').length || 0,
-      lost: pipelineItems?.filter(p => p.stage === 'lost').length || 0,
+    for (const t of (allTenders || [])) {
+      const days = t.days_remaining ?? 999
+      if (days < 0) continue // Skip closed
+      
+      if (days < 7) {
+        urgent.push(t as TenderRow)
+      } else if (days <= 14) {
+        upcoming.push(t as TenderRow)
+      } else if (days <= 30) {
+        newThisWeek.push(t as TenderRow)
+      }
     }
     
-    // Get upcoming deadlines (next 7 days)
-    const sevenDays = addDays(new Date(), 7).toISOString()
-    const { data: upcomingDeadlines } = await supabase
-      .from('toisa_pipeline_items')
-      .select('*, toisa_tenders(title)')
-      .not('deadline', 'is', null)
-      .gte('deadline', new Date().toISOString())
-      .lte('deadline', sevenDays)
-      .order('deadline', { ascending: true })
-      .limit(5)
+    // Sort each by relevance_score desc
+    const sortByRelevance = (a: TenderRow, b: TenderRow) => b.relevance_score - a.relevance_score
+    urgent.sort(sortByRelevance)
+    upcoming.sort(sortByRelevance)
+    newThisWeek.sort(sortByRelevance)
     
-    // Get compliance alerts
-    const { data: expiringDocs } = await supabase
-      .from('toisa_compliance_documents')
-      .select('*')
-      .eq('status', 'expiring_soon')
-      .order('expiry_date', { ascending: true })
-      .limit(3)
+    const totalCount = urgent.length + upcoming.length + newThisWeek.length
     
-    // Build email HTML
-    const newTendersHtml = newTenders && newTenders.length > 0
-      ? newTenders.map(t => `
-          <tr>
-            <td style="padding: 12px; border-bottom: 1px solid #eee;">
-              <strong>${t.title}</strong><br>
-              <span style="color: #666; font-size: 12px;">
-                ${t.source_portal} • ${t.category || 'General'}
-                ${t.closing_date ? ` • Closes: ${format(new Date(t.closing_date), 'MMM d, yyyy')}` : ''}
-              </span>
-            </td>
-          </tr>
-        `).join('')
-      : '<tr><td style="padding: 12px; color: #666;">No new tenders in the last 24 hours</td></tr>'
-    
-    const complianceHtml = expiringDocs && expiringDocs.length > 0
+    // Build sections
+    const urgentSection = urgent.length > 0 
       ? `
-          <div style="background: #fef3cd; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
-            <h3 style="color: #856404; margin: 0 0 12px 0;">⚠️ Expiring Documents</h3>
-            ${expiringDocs.map(d => `
-              <p style="margin: 4px 0; color: #856404;">
-                ${d.name} - Expires ${format(new Date(d.expiry_date), 'MMM d, yyyy')}
-              </p>
-            `).join('')}
-          </div>
-        `
+        <tr>
+          <td style="padding: 0 0 24px 0;">
+            <h2 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: #dc2626; text-transform: uppercase; letter-spacing: 0.5px;">
+              🔴 Urgent — Closing in less than 7 days
+            </h2>
+            <table style="width: 100%; border-collapse: separate; border-spacing: 0 8px;">
+              ${urgent.map(t => buildTenderCard(t, 'urgent')).join('')}
+            </table>
+          </td>
+        </tr>
+      `
       : ''
     
-    const deadlinesHtml = upcomingDeadlines && upcomingDeadlines.length > 0
+    const upcomingSection = upcoming.length > 0
       ? `
-          <h3 style="margin: 16px 0 8px 0;">Upcoming Deadlines</h3>
-          ${upcomingDeadlines.map(item => `
-            <p style="margin: 4px 0;">
-              ${item.subject} - 
-              <strong>${format(new Date(item.deadline), 'MMM d, yyyy')}</strong>
-            </p>
-          `).join('')}
-        `
+        <tr>
+          <td style="padding: 0 0 24px 0;">
+            <h2 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: #d97706; text-transform: uppercase; letter-spacing: 0.5px;">
+              🟡 Upcoming — Closing in 7-14 days
+            </h2>
+            <table style="width: 100%; border-collapse: separate; border-spacing: 0 8px;">
+              ${upcoming.map(t => buildTenderCard(t, 'upcoming')).join('')}
+            </table>
+          </td>
+        </tr>
+      `
+      : ''
+    
+    const newSection = newThisWeek.length > 0
+      ? `
+        <tr>
+          <td style="padding: 0 0 24px 0;">
+            <h2 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: #16a34a; text-transform: uppercase; letter-spacing: 0.5px;">
+              🟢 New This Week — Closing in 14+ days
+            </h2>
+            <table style="width: 100%; border-collapse: separate; border-spacing: 0 8px;">
+              ${newThisWeek.slice(0, 5).map(t => buildTenderCard(t, 'new')).join('')}
+            </table>
+            ${newThisWeek.length > 5 ? `<p style="margin: 8px 0 0 0; font-size: 13px; color: #64748b;">...and ${newThisWeek.length - 5} more in your dashboard</p>` : ''}
+          </td>
+        </tr>
+      `
       : ''
     
     const html = `
-      <div style="font-family: system-ui, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="background: #1e40af; color: white; padding: 24px; border-radius: 8px 8px 0 0;">
-          <h1 style="margin: 0;">TOISA Daily Digest</h1>
-          <p style="margin: 8px 0 0 0; opacity: 0.8;">
-            ${format(new Date(), 'MMMM d, yyyy')}
-          </p>
-        </div>
-        
-        <div style="background: #f8fafc; padding: 24px; border: 1px solid #e2e8f0; border-top: none;">
-          ${complianceHtml}
-          
-          <h2 style="margin: 0 0 16px 0; color: #1e293b;">New Tenders (${newTenders?.length || 0})</h2>
-          <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
-            ${newTendersHtml}
-          </table>
-          
-          <h2 style="margin: 24px 0 16px 0; color: #1e293b;">Pipeline Summary</h2>
-          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-            <div style="background: white; padding: 16px; border-radius: 8px; text-align: center;">
-              <div style="font-size: 24px; font-weight: bold; color: #3b82f6;">${pipelineSummary.discovered}</div>
-              <div style="font-size: 12px; color: #666;">Discovered</div>
-            </div>
-            <div style="background: white; padding: 16px; border-radius: 8px; text-align: center;">
-              <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">${pipelineSummary.in_progress}</div>
-              <div style="font-size: 12px; color: #666;">In Progress</div>
-            </div>
-            <div style="background: white; padding: 16px; border-radius: 8px; text-align: center;">
-              <div style="font-size: 24px; font-weight: bold; color: #8b5cf6;">${pipelineSummary.submitted}</div>
-              <div style="font-size: 12px; color: #666;">Submitted</div>
-            </div>
-          </div>
-          
-          ${deadlinesHtml}
-          
-          <div style="margin-top: 24px; padding-top: 24px; border-top: 1px solid #e2e8f0;">
-            <a href="${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard" 
-               style="display: inline-block; background: #1e40af; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none;">
-              Open TOISA Dashboard
-            </a>
-          </div>
-        </div>
-        
-        <div style="background: #f1f5f9; padding: 16px; border-radius: 0 0 8px 8px; text-align: center; color: #64748b; font-size: 12px;">
-          <p style="margin: 0;">TOISA - Tender Operations Intelligence System</p>
-          <p style="margin: 4px 0 0 0;">For Mahlasela Za (Pty) Ltd</p>
-        </div>
-      </div>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="margin: 0; padding: 0; background: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background: #f1f5f9; padding: 24px;">
+          <tr>
+            <td align="center">
+              <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; width: 100%;">
+                <!-- Header -->
+                <tr>
+                  <td style="background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%); padding: 28px 32px; border-radius: 12px 12px 0 0;">
+                    <h1 style="margin: 0; color: white; font-size: 24px; font-weight: 700;">
+                      TOISA Daily Digest
+                    </h1>
+                    <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.85); font-size: 14px;">
+                      ${format(new Date(), 'MMMM d, yyyy')} · ${totalCount} tenders to review
+                    </p>
+                  </td>
+                </tr>
+                
+                <!-- Filters info -->
+                ${profile ? `
+                <tr>
+                  <td style="background: #e0e7ff; padding: 12px 24px; font-size: 12px; color: #3730a3;">
+                    📋 Your filters: ${(profile.service_categories || []).join(', ')} · ${(profile.provinces || []).join(', ')}
+                  </td>
+                </tr>
+                ` : ''}
+                
+                <!-- Content -->
+                <tr>
+                  <td style="background: white; padding: 24px 32px;">
+                    ${totalCount === 0 ? `
+                      <p style="text-align: center; color: #64748b; padding: 32px 0;">
+                        No new tenders match your filters today. Check back soon!
+                      </p>
+                    ` : `
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        ${urgentSection}
+                        ${upcomingSection}
+                        ${newSection}
+                      </table>
+                    `}
+                  </td>
+                </tr>
+                
+                <!-- CTA -->
+                ${totalCount > 0 ? `
+                <tr>
+                  <td style="background: white; padding: 0 32px 24px 32px;">
+                    <a href="${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard/tenders" 
+                       style="display: inline-block; background: #1e40af; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px;">
+                      View All Tenders →
+                    </a>
+                  </td>
+                </tr>
+                ` : ''}
+                
+                <!-- Footer -->
+                <tr>
+                  <td style="background: #f8fafc; padding: 20px 32px; border-radius: 0 0 12px 12px; text-align: center; border-top: 1px solid #e2e8f0;">
+                    <p style="margin: 0; color: #64748b; font-size: 12px;">
+                      TOISA — Tender Operations Intelligence System
+                    </p>
+                    <p style="margin: 4px 0 0 0; color: #94a3b8; font-size: 11px;">
+                      For Mahlasela Za (Pty) Ltd
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
     `
     
     // Send email
     const { error } = await resend.emails.send({
       from: 'TOISA <toisa@resend.dev>',
       to: userEmail,
-      subject: `TOISA Daily Digest - ${newTenders?.length || 0} new tenders`,
+      subject: `TOISA Daily Digest — ${totalCount} tenders to review`,
       html,
     })
     
@@ -163,7 +264,10 @@ export async function POST() {
     
     return NextResponse.json({
       success: true,
-      tender_count: newTenders?.length || 0,
+      tender_count: totalCount,
+      urgent_count: urgent.length,
+      upcoming_count: upcoming.length,
+      new_count: newThisWeek.length,
       sent_to: userEmail,
     })
   } catch (error) {
