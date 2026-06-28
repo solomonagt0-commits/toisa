@@ -164,7 +164,7 @@ export async function GET(request: Request) {
     
     // Send email
     const { error } = await resend.emails.send({
-      from: 'TOISA <toisa@gramatis.co.za>',
+      from: 'TOISA <toisa@resend.dev>',
       to: userEmail,
       subject: `📋 TOISA Daily Digest - ${recentTenders?.length || 0} new tenders found`,
       html,

@@ -131,7 +131,7 @@ export async function POST() {
     
     // Send email
     const { error } = await resend.emails.send({
-      from: 'TOISA Alerts <alerts@gramatis.co.za>',
+      from: 'TOISA Alerts <toisa@resend.dev>',
       to: userEmail,
       subject: `⚠️ TOISA Compliance Alert - ${documents.length} documents need attention`,
       html,

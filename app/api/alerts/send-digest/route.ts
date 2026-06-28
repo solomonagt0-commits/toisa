@@ -150,7 +150,7 @@ export async function POST() {
     
     // Send email
     const { error } = await resend.emails.send({
-      from: 'TOISA <toisa@gramatis.co.za>',
+      from: 'TOISA <toisa@resend.dev>',
       to: userEmail,
       subject: `TOISA Daily Digest - ${newTenders?.length || 0} new tenders`,
       html,
