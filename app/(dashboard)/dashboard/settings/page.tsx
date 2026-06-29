@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
-import { Loader2, Mail, Check, X } from 'lucide-react'
+import { Loader2, Mail, Check, X, Link2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface UserProfile {
@@ -112,9 +112,39 @@ export default function SettingsPage() {
   }
 
   async function checkGmailConnection() {
-    // For demo purposes, we'll show Gmail as connected if we have OAuth tokens
-    const hasGmailToken = !!localStorage.getItem('gmail_access_token')
-    setGmailConnected(hasGmailToken)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) return
+
+      const { data } = await supabase
+        .from('gmail_connections')
+        .select('id')
+        .eq('user_id', user.id)
+        .single()
+
+      setGmailConnected(!!data)
+    } catch (e) {
+      console.error('Error checking Gmail connection:', e)
+      setGmailConnected(false)
+    }
+  }
+
+  async function handleConnectGmail() {
+    window.location.href = '/api/auth/gmail/connect'
+  }
+
+  async function handleDisconnectGmail() {
+    try {
+      const response = await fetch('/api/auth/gmail/disconnect', { method: 'DELETE' })
+      if (response.ok) {
+        setGmailConnected(false)
+        toast.success('Gmail disconnected')
+      } else {
+        toast.error('Failed to disconnect Gmail')
+      }
+    } catch (e) {
+      toast.error('Failed to disconnect Gmail')
+    }
   }
 
   async function handleSave() {
@@ -332,18 +362,13 @@ export default function SettingsPage() {
                 <Badge className="bg-green-100 text-green-700">
                   <Check className="w-3 h-3 mr-1" /> Connected
                 </Badge>
-                <Button variant="outline" size="sm" onClick={() => {
-                  localStorage.removeItem('gmail_access_token')
-                  setGmailConnected(false)
-                  toast.success('Gmail disconnected')
-                }}>
+                <Button variant="outline" size="sm" onClick={handleDisconnectGmail}>
                   Disconnect
                 </Button>
               </div>
             ) : (
-              <Button variant="outline" onClick={() => {
-                toast.info('Gmail OAuth would open here in production')
-              }}>
+              <Button variant="outline" onClick={handleConnectGmail}>
+                <Link2 className="w-4 h-4 mr-2" />
                 Connect Gmail
               </Button>
             )}

@@ -18,7 +18,8 @@ export async function POST() {
       .from('toisa_tenders')
       .delete()
       .lt('closing_date', sevenDaysAgo.toISOString())
-      .eq('status', 'new') // Only delete unreviewed tenders
+      .eq('status', 'new')
+      .select()
     
     if (error) {
       console.error('Cleanup error:', error)
@@ -33,6 +34,7 @@ export async function POST() {
       .from('toisa_tenders')
       .delete()
       .lt('discovered_at', thirtyDaysAgo.toISOString())
+      .select()
     
     if (error2) {
       console.error('Old cleanup error:', error2)

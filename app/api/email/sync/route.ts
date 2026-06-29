@@ -30,10 +30,8 @@ const emailRules = [
 ]
 
 function extractTenderInfo(subject: string, body: string): { tenderNumber?: string; title?: string } {
-  // Extract tender number patterns
   const tenderNumberMatch = subject.match(/[A-Z]+[\-\/]?\d+[\/\-]?\d+/i)
   
-  // Try to get a clean title from subject
   let title = subject
     .replace(/^(RE:|FW:|FWD:)\s*/i, '')
     .replace(/\[.*?\]/g, '')
@@ -50,6 +48,123 @@ function extractTenderInfo(subject: string, body: string): { tenderNumber?: stri
   }
 }
 
+async function getValidGmailAccessToken(supabase: any, userId: string): Promise<string | null> {
+  const { data: connection } = await supabase
+    .from('gmail_connections')
+    .select('access_token, refresh_token, expiry_date')
+    .eq('user_id', userId)
+    .single()
+
+  if (!connection) return null
+
+  // Check if token is expired (with 5 min buffer)
+  const expiryTime = new Date(connection.expiry_date).getTime()
+  const now = Date.now()
+  const bufferMs = 5 * 60 * 1000
+
+  if (expiryTime - now > bufferMs) {
+    // Token still valid
+    return connection.access_token
+  }
+
+  // Need to refresh
+  if (!connection.refresh_token) return null
+
+  const clientId = process.env.GMAIL_CLIENT_ID
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET
+
+  if (!clientId || !clientSecret) return null
+
+  try {
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: connection.refresh_token,
+        grant_type: 'refresh_token',
+      }),
+    })
+
+    if (!tokenResponse.ok) return null
+
+    const tokens = await tokenResponse.json()
+
+    // Update stored tokens
+    await supabase
+      .from('gmail_connections')
+      .update({
+        access_token: tokens.access_token,
+        expiry_date: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId)
+
+    return tokens.access_token
+  } catch {
+    return null
+  }
+}
+
+async function fetchGmailMessages(accessToken: string, maxResults = 20) {
+  // List messages from inbox
+  const listResponse = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${maxResults}&labelIds=INBOX`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  )
+
+  if (!listResponse.ok) {
+    throw new Error('Failed to fetch Gmail messages')
+  }
+
+  const listData = await listResponse.json()
+  const messages = listData.messages || []
+
+  // Fetch full message details
+  const detailedMessages = []
+  for (const msg of messages.slice(0, 10)) { // Limit to 10 for performance
+    const msgResponse = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    )
+
+    if (msgResponse.ok) {
+      const msgData = await msgResponse.json()
+      detailedMessages.push(msgData)
+    }
+  }
+
+  return detailedMessages
+}
+
+function parseGmailMessage(message: any): { subject: string; sender: string; body: string; date: string } {
+  const headers = message.payload?.headers || []
+  
+  const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || '(No Subject)'
+  const sender = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || ''
+  const date = new Date(parseInt(message.internalDate)).toISOString()
+
+  // Extract body
+  let body = ''
+  if (message.payload?.body?.data) {
+    body = Buffer.from(message.payload.body.data, 'base64').toString('utf-8')
+  } else if (message.payload?.parts) {
+    for (const part of message.payload.parts) {
+      if (part.body?.data) {
+        body = Buffer.from(part.body.data, 'base64').toString('utf-8')
+        break
+      }
+    }
+  }
+
+  return { subject, sender, body, date }
+}
+
 export async function POST() {
   try {
     const supabase = await createClient()
@@ -58,60 +173,59 @@ export async function POST() {
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
+
+    // Get valid access token
+    const accessToken = await getValidGmailAccessToken(supabase, user.id)
     
-    // For demo purposes, we'll simulate email sync
-    // In production, this would use Gmail API with OAuth tokens
+    if (!accessToken) {
+      return NextResponse.json({ 
+        error: 'Gmail not connected',
+        code: 'GMAIL_NOT_CONNECTED'
+      }, { status: 400 })
+    }
+
+    // Fetch real Gmail messages
+    const messages = await fetchGmailMessages(accessToken)
     
     let processed = 0
     let created = 0
     let updated = 0
-    
-    // Simulated email data for demo (in production, fetch from Gmail API)
-    const simulatedEmails = [
-      {
-        subject: 'RFQ: Supply and Delivery of Water Tanks - REF: WT-2026-001',
-        sender: 'procurement@government.gov.za',
-        body: 'Dear Supplier, Please submit your quotation for the supply and delivery of water tanks...',
-        date: new Date().toISOString()
-      },
-      {
-        subject: 'Award Notification - Construction Services Contract',
-        sender: 'awards@etenders.gov.za',
-        body: 'Congratulations! Your company has been awarded the contract...',
-        date: new Date().toISOString()
-      }
-    ]
-    
-    for (const email of simulatedEmails) {
-      processed++
+
+    for (const message of messages) {
+      const { subject, sender, body, date } = parseGmailMessage(message)
       
+      // Skip very short subjects (likely automated)
+      if (subject.length < 10) continue
+
+      processed++
+
       // Check if pipeline item already exists by subject
       const { data: existing } = await supabase
         .from('toisa_pipeline_items')
         .select('id, stage')
-        .eq('subject', email.subject)
+        .eq('subject', subject)
         .single()
-      
-      const { tenderNumber, title } = extractTenderInfo(email.subject, email.body)
-      
+
+      const { tenderNumber, title } = extractTenderInfo(subject, body)
+
       // Determine stage from email rules
       let newStage = 'discovered'
       for (const rule of emailRules) {
-        if (rule.pattern.test(email.subject) || rule.pattern.test(email.body)) {
+        if (rule.pattern.test(subject) || rule.pattern.test(body)) {
           if (rule.stage) {
             newStage = rule.stage
           }
           break
         }
       }
-      
+
       if (existing) {
         // Update existing
         await supabase
           .from('toisa_pipeline_items')
           .update({ 
             stage: newStage,
-            body: email.body.substring(0, 1000),
+            body: body.substring(0, 1000),
             updated_at: new Date().toISOString()
           })
           .eq('id', existing.id)
@@ -120,21 +234,21 @@ export async function POST() {
         // Create new
         await supabase.from('toisa_pipeline_items').insert({
           subject: title,
-          sender: email.sender,
-          body: email.body.substring(0, 1000),
+          sender: sender,
+          body: body.substring(0, 1000),
           stage: newStage,
           source: 'email',
-          deadline: null, // Would need to parse from email
+          deadline: null,
         })
         created++
       }
     }
-    
+
     return NextResponse.json({
       processed,
       created,
       updated,
-      message: 'Email sync completed (demo mode)'
+      message: 'Email sync completed'
     })
   } catch (error) {
     console.error('Email sync error:', error)
